@@ -6,6 +6,7 @@ import random
 from skimage.metrics import structural_similarity as ssim
 import math
 import io
+import hashlib
 
 # =============================
 # 🎨 CUSTOM UI
@@ -33,6 +34,14 @@ h1, h2, h3 {
 
 st.title("🔐 Hybrid Crypto-Steganography")
 st.caption("Vigenere Cipher + Adaptive LSB (Edge + Random)")
+
+st.warning("⚠️ Gunakan format PNG! JPG akan merusak data steganografi.")
+
+# =============================
+# 🔑 SEED (FIX)
+# =============================
+def get_seed(key):
+    return int(hashlib.sha256(key.encode()).hexdigest(), 16)
 
 # =============================
 # 🔐 VIGENERE
@@ -68,15 +77,26 @@ def vigenere_decrypt(cipher, key):
     return result
 
 # =============================
-# EDGE
+# EDGE (FIX STABIL)
 # =============================
 def get_edge_positions(image):
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    edges = cv2.Canny(gray, 100, 200)
-    return np.argwhere(edges > 0)
+    
+    # blur biar stabil
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    edges = cv2.Canny(gray, 50, 150)
+    positions = np.argwhere(edges > 0)
+
+    # fallback kalau edge terlalu sedikit
+    if len(positions) < 100:
+        h, w, _ = image.shape
+        positions = np.array([(i, j) for i in range(h) for j in range(w)])
+
+    return positions
 
 # =============================
-# EMBED
+# EMBED (FIX)
 # =============================
 def embed_data(image, data, key):
     img = image.copy()
@@ -86,8 +106,13 @@ def embed_data(image, data, key):
     binary_data = data_len + binary_data
 
     positions = get_edge_positions(img)
-    random.seed(key)
+
+    random.seed(get_seed(key))
     random.shuffle(positions)
+
+    max_capacity = len(positions) * 3
+    if len(binary_data) > max_capacity:
+        raise ValueError("Message too large for this image")
 
     idx = 0
     for pos in positions:
@@ -96,17 +121,21 @@ def embed_data(image, data, key):
             if idx < len(binary_data):
                 img[i, j, k] = (img[i, j, k] & 254) | int(binary_data[idx])
                 idx += 1
+            else:
+                break
+        if idx >= len(binary_data):
+            break
 
     return img
 
 # =============================
-# EXTRACT
+# EXTRACT (FIX)
 # =============================
 def extract_data(image, key):
     img = image.copy()
     positions = get_edge_positions(img)
 
-    random.seed(key)
+    random.seed(get_seed(key))
     random.shuffle(positions)
 
     bits = []
@@ -116,12 +145,22 @@ def extract_data(image, key):
             bits.append(str(img[i, j, k] & 1))
 
     bits = ''.join(bits)
+
+    if len(bits) < 32:
+        raise ValueError("Invalid image or no hidden data")
+
     data_len = int(bits[:32], 2)
+
+    if data_len <= 0 or data_len > len(bits):
+        raise ValueError("Corrupted data or wrong key")
+
     data_bits = bits[32:32 + data_len]
 
     chars = []
     for i in range(0, len(data_bits), 8):
-        chars.append(chr(int(data_bits[i:i+8], 2)))
+        byte = data_bits[i:i+8]
+        if len(byte) == 8:
+            chars.append(chr(int(byte, 2)))
 
     return ''.join(chars)
 
@@ -149,7 +188,7 @@ if mode == "🔐 Embed":
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        uploaded_file = st.file_uploader("📷 Upload Image", type=["png", "jpg", "jpeg"])
+        uploaded_file = st.file_uploader("📷 Upload Image", type=["png"])
         message = st.text_area("📝 The text you want to hide")
         key = st.text_input("🔑 Password / Key", type="password")
 
@@ -160,55 +199,59 @@ if mode == "🔐 Embed":
             st.image(uploaded_file, caption="Preview Image")
 
     if process and uploaded_file and message and key:
-        image = Image.open(uploaded_file).convert("RGB")
-        img_array = np.array(image)
+        try:
+            image = Image.open(uploaded_file).convert("RGB")
+            img_array = np.array(image)
 
-        cipher = vigenere_encrypt(message, key)
-        stego_img = embed_data(img_array, cipher, key)
+            cipher = vigenere_encrypt(message, key)
+            stego_img = embed_data(img_array, cipher, key)
 
-        psnr_val = calculate_psnr(img_array, stego_img)
-        ssim_val = calculate_ssim(img_array, stego_img)
+            psnr_val = calculate_psnr(img_array, stego_img)
+            ssim_val = calculate_ssim(img_array, stego_img)
 
-        st.success("✅ Embedding Success")
+            st.success("✅ Embedding Success")
 
-        st.subheader("🔑 Ciphertext")
-        st.code(cipher)
+            st.subheader("🔑 Ciphertext")
+            st.code(cipher)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(image, caption="Original")
-        with col2:
-            st.image(stego_img, caption="Stego")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.image(image, caption="Original")
+            with col2:
+                st.image(stego_img, caption="Stego")
 
-        col1, col2 = st.columns(2)
-        col1.metric("PSNR", f"{psnr_val:.2f}")
-        col2.metric("SSIM", f"{ssim_val:.4f}")
+            col1, col2 = st.columns(2)
+            col1.metric("PSNR", f"{psnr_val:.2f}")
+            col2.metric("SSIM", f"{ssim_val:.4f}")
 
-        buf = io.BytesIO()
-        Image.fromarray(stego_img).save(buf, format="PNG")
+            buf = io.BytesIO()
+            Image.fromarray(stego_img).save(buf, format="PNG")
 
-        st.download_button(
-            "⬇️ Download Stego Image",
-            buf.getvalue(),
-            "stego.png",
-            "image/png"
-        )
+            st.download_button(
+                "⬇️ Download Stego Image",
+                buf.getvalue(),
+                "stego.png",
+                "image/png"
+            )
+
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
 
 # =============================
 # EXTRACT UI
 # =============================
 if mode == "🔓 Extract":
-    uploaded_file = st.file_uploader("📷 Upload Stego Image", type=["png", "jpg", "jpeg"])
+    uploaded_file = st.file_uploader("📷 Upload Stego Image", type=["png"])
     key = st.text_input("🔑 Password / Key", type="password")
 
     if uploaded_file:
         st.image(uploaded_file, caption="Stego Preview")
 
     if st.button("🔍 Extract") and uploaded_file and key:
-        image = Image.open(uploaded_file).convert("RGB")
-        img_array = np.array(image)
-
         try:
+            image = Image.open(uploaded_file).convert("RGB")
+            img_array = np.array(image)
+
             cipher = extract_data(img_array, key)
             message = vigenere_decrypt(cipher, key)
 
@@ -220,5 +263,5 @@ if mode == "🔓 Extract":
             st.subheader("📨 Decrypted Message")
             st.success(message)
 
-        except:
-            st.error("❌ Failed! Wrong key or invalid image.")
+        except Exception as e:
+            st.error(f"❌ Failed: {str(e)}")
